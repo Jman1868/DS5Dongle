@@ -15,9 +15,12 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <sys/ioctl.h>
@@ -59,6 +62,8 @@ struct HidState {
     std::string adapter_address;
     std::string controller_address;
     std::mutex mutex;
+    std::mutex output_mutex;
+    std::deque<std::vector<uint8_t>> output_reports;
 };
 
 void log_line(const char *format, ...) {
@@ -118,6 +123,27 @@ int get_property(sd_bus *bus, const char *path, const char *interface,
     return read_result;
 }
 
+int get_bool_property(sd_bus *bus, const char *path, const char *interface,
+                      const char *property, bool &value) {
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *reply = nullptr;
+    int result = sd_bus_call_method(bus, "org.bluez", path,
+        "org.freedesktop.DBus.Properties", "Get", &error, &reply, "ss",
+        interface, property);
+    if (result < 0) {
+        log_bus_error(property, result, &error);
+        sd_bus_error_free(&error);
+        return result;
+    }
+    int raw = 0;
+    result = sd_bus_message_read(reply, "v", "b", &raw);
+    if (result >= 0) value = raw != 0;
+    else log_bus_error(property, result, nullptr);
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    return result;
+}
+
 int set_property(sd_bus *bus, const char *path, const char *interface,
                  const char *property, bool value) {
     return call_method(bus, "org.bluez", path, "org.freedesktop.DBus.Properties",
@@ -166,18 +192,21 @@ bool matches_device(const Device &device) {
            contains_ci(device.name, "ds5") ||
            contains_ci(device.name, "sony") ||
            device.device_class == 0x000508 ||
+           device.device_class == 0x002508 ||
            device.icon == "input-gaming" ||
            std::find(device.uuids.begin(), device.uuids.end(),
                      "00001124-0000-1000-8000-00805f9b34fb") != device.uuids.end();
 }
 
 void log_device(Discovery *discovery, Device &device) {
+    static std::unordered_set<std::string> known_dualsense_paths;
     discovery->devices_seen++;
     log_line("dev added path=%s Name=%s Icon=%s Class=0x%06X RSSI=%d",
              device.path.c_str(), device.name.c_str(), device.icon.c_str(),
              device.device_class, device.rssi);
     discovery->devices[device.path] = device;
-    if (matches_device(device)) {
+    if (matches_device(device) || known_dualsense_paths.count(device.path) != 0) {
+        known_dualsense_paths.insert(device.path);
         discovery->matches++;
         if (discovery->device.path.empty()) discovery->device = device;
         log_line("matched DualSense candidate path=%s", device.path.c_str());
@@ -344,16 +373,46 @@ bool discover(Bus &bus, Discovery &discovery) {
 
 bool pair_connect(Bus &bus, const Device &device) {
     log_line("device found %s at %s", device.address.c_str(), device.path.c_str());
-    int result = call_method(bus.bus, "org.bluez", device.path.c_str(), "org.bluez.Device1", "Pair");
-    if (result < 0 && result != -EALREADY && result != -EEXIST) {
-        log_line("pairing retry in 2 seconds");
+    bool paired = false;
+    bool connected = false;
+    get_bool_property(bus.bus, device.path.c_str(), "org.bluez.Device1", "Paired", paired);
+    get_bool_property(bus.bus, device.path.c_str(), "org.bluez.Device1", "Connected", connected);
+    if (connected) {
+        log_line("already connected — proceeding");
+    } else if (paired) {
+        log_line("already paired — skipping Pair");
+    } else {
+        sd_bus_error error = SD_BUS_ERROR_NULL;
+        sd_bus_message *reply = nullptr;
+        const int result = sd_bus_call_method(bus.bus, "org.bluez", device.path.c_str(),
+            "org.bluez.Device1", "Pair", &error, &reply, "");
+        if (result < 0 && error.name &&
+            strcmp(error.name, "org.bluez.Error.AlreadyExists") == 0) {
+            log_line("Pair returned AlreadyExists (already paired) — proceeding");
+        } else if (result < 0) {
+            log_bus_error("Pair", result, &error);
+            sd_bus_error_free(&error);
+            sd_bus_message_unref(reply);
+            log_line("pairing retry in 2 seconds");
+            return false;
+        } else {
+            log_line("paired %s", device.address.c_str());
+        }
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+    }
+    int result = set_property(bus.bus, device.path.c_str(), "org.bluez.Device1", "Trusted", true);
+    if (result < 0 && result != -EALREADY && result != -EEXIST) return false;
+    log_line("trusted");
+    if (!connected) {
+        result = call_method(bus.bus, "org.bluez", device.path.c_str(), "org.bluez.Device1", "Connect");
+        if (result < 0 && result != -EALREADY && result != -EEXIST) return false;
+    }
+    if (get_bool_property(bus.bus, device.path.c_str(), "org.bluez.Device1", "Connected", connected) < 0 ||
+        !connected) {
+        log_line("device did not report Connected=true");
         return false;
     }
-    log_line("paired %s", device.address.c_str());
-    result = set_property(bus.bus, device.path.c_str(), "org.bluez.Device1", "Trusted", true);
-    if (result < 0 && result != -EALREADY && result != -EEXIST) return false;
-    result = call_method(bus.bus, "org.bluez", device.path.c_str(), "org.bluez.Device1", "Connect");
-    if (result < 0 && result != -EALREADY && result != -EEXIST) return false;
     log_line("connected");
     return true;
 }
@@ -466,6 +525,11 @@ void get_report_servo(HidState *state) {
             log_line("GET_REPORT servo read failed: %s", strerror(errno));
             continue;
         }
+        if (length > 0) {
+            std::lock_guard<std::mutex> lock(state->output_mutex);
+            state->output_reports.emplace_back(buffer.begin(), buffer.begin() + length);
+            continue;
+        }
         if (length != 0) continue;
         uint8_t report_id = 0;
         if (ioctl(state->fd, GADGET_HID_READ_GET_REPORT_ID, &report_id) < 0) {
@@ -503,31 +567,39 @@ uint32_t output_crc(const uint8_t *data, size_t length) {
     return ~crc;
 }
 
-bool pump(int hid, int input, int output, bool l2cap) {
+bool pump(int input, int output, bool l2cap, HidState *state) {
     std::array<uint8_t, 672> packet{};
     unsigned long reports = 0;
     uint8_t sequence = 0;
     while (true) {
-        pollfd fds[]{{input, POLLIN | POLLERR | POLLHUP}, {hid, POLLIN | POLLERR | POLLHUP}};
-        const int ready = poll(fds, 2, 1000);
+        pollfd descriptor{input, POLLIN | POLLERR | POLLHUP, 0};
+        const int ready = poll(&descriptor, 1, 100);
         if (ready < 0) {
             if (errno == EINTR) continue;
             log_line("poll failed: %s", strerror(errno));
             return false;
         }
-        if (fds[0].revents & (POLLERR | POLLHUP)) return false;
-        if (fds[0].revents & POLLIN) {
+        if (descriptor.revents & (POLLERR | POLLHUP)) return false;
+        if (descriptor.revents & POLLIN) {
             const ssize_t length = read(input, packet.data(), packet.size());
             if (length <= 0) return false;
             if (packet[0] == 0xA1 && length > 1 &&
-                !write_full(hid, packet.data() + 1, static_cast<size_t>(length - 1)))
+                !write_full(state->fd, packet.data() + 1, static_cast<size_t>(length - 1)))
                 return false;
             if (++reports % 100 == 0) log_line("forwarded %lu reports", reports);
         }
-        if (fds[1].revents & (POLLERR | POLLHUP)) return false;
-        if (fds[1].revents & POLLIN) {
-            const ssize_t length = read(hid, packet.data(), packet.size());
-            if (length > 0) {
+        std::vector<uint8_t> report;
+        {
+            std::lock_guard<std::mutex> lock(state->output_mutex);
+            if (!state->output_reports.empty()) {
+                report = std::move(state->output_reports.front());
+                state->output_reports.pop_front();
+            }
+        }
+        if (!report.empty()) {
+            const ssize_t length = static_cast<ssize_t>(report.size());
+            std::copy(report.begin(), report.end(), packet.begin());
+            {
                 if (l2cap) {
                     std::array<uint8_t, 78> bt_packet{};
                     bt_packet[0] = 0xA2;
@@ -542,9 +614,6 @@ bool pump(int hid, int input, int output, bool l2cap) {
                 } else if (!write_full(output, packet.data(), static_cast<size_t>(length))) {
                     return false;
                 }
-            } else if (length < 0 && errno != EAGAIN && errno != EINTR) {
-                log_line("read hidg0 failed: %s", strerror(errno));
-                return false;
             }
         }
     }
@@ -599,11 +668,6 @@ int main() {
         std::string raw;
         while (std::chrono::steady_clock::now() < deadline && (raw = hidraw_path()).empty())
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const int hid = dup(hidgfd);
-        if (hid < 0) {
-            log_line("dup hidg0 failed: %s", strerror(errno));
-            continue;
-        }
         int control = -1, input = -1, output = -1;
         if (!raw.empty()) {
             input = output = open(raw.c_str(), O_RDWR | O_NONBLOCK);
@@ -622,14 +686,12 @@ int main() {
             if (control >= 0) close(control);
             if (input >= 0) close(input);
             if (output >= 0 && output != input) close(output);
-            close(hid);
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
         }
-        pump(hid, input, output, raw.empty());
+        pump(input, output, raw.empty(), &hid_state);
         log_line("disconnect; closing transport");
         if (control >= 0) close(control);
-        close(hid);
         close(input);
         if (output != input) close(output);
         std::this_thread::sleep_for(std::chrono::seconds(2));
