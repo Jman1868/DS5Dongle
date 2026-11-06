@@ -39,6 +39,22 @@ implementation.
   `hid-playstation` rejects the device while probing feature report `0x09`.
   The probe has an explicit, loud `--spike-fake-features` mode for synthetic
   reports; it is never enabled by default and remains untested on hardware.
+- With synthetic features enabled, Linux/Zorin kernel `hid-playstation`
+  registered the controller successfully with fake hardware/firmware versions,
+  gamepad, motion, touchpad, and headset-jack input devices plus by-id event
+  and js nodes. The host requested report IDs `0x09` (20 bytes), `0x20`
+  (64 bytes), and `0x05` (41 bytes); all payloads were synthetic.
+- The host's `evtest` showed the complete DualSense capability set (buttons,
+  six axes, hat, and `FF_RUMBLE`) but no events with an unchanged static input
+  report. The probe now has opt-in `--spike-animate` mode, clearly labeled
+  `SPIKE ONLY`, which changes the X axis and toggles one button once per
+  second. It is disabled by default and is intended only to prove input
+  delivery.
+- The probe's earlier unconditional GET_REPORT ioctl polling repeatedly
+  answered the last pending ID, which explains repeated `0x05` requests around
+  disconnect. `f_hid` signals a new GET_REPORT through `POLLPRI`; the probe now
+  waits for that event. A transport `ESHUTDOWN`/`ENODEV` now produces one
+  rate-limited message and clean exit.
 - The source descriptor authority is `src/usb_descriptors.cpp`: the DS HID
   report array starts at line 513 and is asserted to 337 bytes at line 682;
   the Edge array starts at line 684 and is asserted to 453 bytes at line 911.
@@ -55,6 +71,10 @@ implementation.
   clean enumeration; its cause is unknown and may be cable/timing related.
 - The compatibility of `hidraw` with the DualSense Bluetooth feature-report
   protocol remains unverified.
+- Windows enumeration remains untested.
+- USB output reports for rumble, lightbar, and haptics remain untested.
+- Audio remains untested: stock UAC1 matching versus a later FunctionFS
+  implementation has not been exercised on hardware.
 
 ## Open questions
 
@@ -106,6 +126,53 @@ already owns the relevant transport in a way that permits complete feature
 report access through hidraw. Raw L2CAP remains a fallback, not part of this
 phase's initial implementation.
 
+Specific Phase 3.3 risks are:
+
+- `hid-playstation` may claim the Bluetooth HID device on the Pi before the
+  bridge opens it, changing which hidraw node is available or consuming
+  feature requests.
+- BlueZ/kernel hidraw may expose only parsed HID reports, reject feature
+  reports, or hide the Bluetooth `0x43`/`0xA3` and `0x53`/`0xA2` framing.
+- Bluetooth feature responses require correct CRC32 and sequence handling;
+  forwarding USB payloads without translating the transport framing will fail.
+- Synchronous USB GET_REPORT handling can exceed the host's control-transfer
+  timeout if the controller is asleep, disconnected, or slow to answer.
+- A reconnect race can leave stale hidraw descriptors or a pending ConfigFS
+  control request; every failure path must release and rediscover both ends.
+
+### Phase 3.3 test checklist
+
+1. Pair a real controller with BlueZ while the USB gadget is stopped; record
+   `bluetoothctl devices`, `bluetoothctl info <address>`, and the matching
+   `/dev/hidraw*` udev properties.
+2. Confirm whether `hid-playstation` claims the controller on the Pi. Record
+   `dmesg`, `/sys/bus/hid/devices`, and all `hidraw` symlinks. If it claims
+   the device, decide whether the bridge must use its hidraw node or prevent
+   competing binding before proceeding.
+3. Use a standalone hidraw feature-report test to request `0x09` (20 bytes),
+   `0x20` (64 bytes), and `0x05` (41 bytes), recording return lengths, report
+   IDs, and whether Bluetooth framing/CRC is exposed or handled by the kernel.
+4. With the USB gadget attached to a Linux host, forward those three requests
+   and compare host-visible lengths and IDs with the direct hidraw results.
+5. Repeat with the Windows HID host and capture the probe log, Device Manager,
+   and USB descriptor viewer results.
+6. Only after feature forwarding is stable, test SET_REPORT output forwarding
+   separately for rumble, lightbar, and haptics, with a safe teardown path.
+7. Test controller disconnect/reconnect, USB host disconnect/reconnect, and
+   simultaneous Wi-Fi SSH access. Preserve logs from both sides.
+
+For the input-delivery spike, run:
+
+```sh
+timeout 30s sudo ./build-linux/ds5dongle_hid_probe /dev/hidg0 --spike-animate
+sudo evtest "$(find /dev/input/by-id -maxdepth 1 -type l -name '*event-joystick' -print -quit)"
+```
+
+Expect `ABS_X` values `0, 64, 128, 192, 255` cycling once per second and
+one mapped button alternating between key values 1 and 0. No events from the
+unchanged default report are expected; evdev reports capabilities separately
+from value-change events.
+
 ## Hardware observations and kernel probe order
 
 The v6.18 `hid-playstation` source requests features in this order for a
@@ -120,3 +187,10 @@ normalization denominators with safe defaults. Source reference:
 `dualsense_get_mac_address` around 1167-1185,
 `dualsense_get_firmware_info` around 1137-1163,
 and `dualsense_get_calibration_data` around 1007-1132.
+
+The initial host log was reported as `0x05`, `0x09`, `0x20`, but the repeated
+`0x05` entries were not reliable evidence of new host requests: the probe was
+re-reading a stale report ID because it did not wait for `POLLPRI`. The
+driver's source order is authoritative for the normal registration path:
+`0x09` -> `0x20` -> `0x05`. Future logs from the fixed probe should be used
+to confirm the on-wire order.

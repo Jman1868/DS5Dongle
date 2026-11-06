@@ -98,14 +98,41 @@ static void log_get_report(std::uint8_t id, std::uint16_t length,
         ++entry.second;
     }
 }
+
+static void log_transport_error(int error, std::chrono::steady_clock::time_point &last_error,
+                                unsigned &suppressed) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_error).count();
+    if (suppressed == 0 || elapsed >= 1000) {
+        std::fprintf(stderr, "transport error: %s", std::strerror(error));
+        if (suppressed != 0) std::fprintf(stderr, " (suppressed %u duplicate errors)", suppressed);
+        std::fputc('\n', stderr);
+        last_error = now;
+        suppressed = 0;
+    } else {
+        ++suppressed;
+    }
+}
 #endif
 
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "/dev/hidg0";
-    const bool spike_fake_features = argc > 2 && std::strcmp(argv[2], "--spike-fake-features") == 0;
+    bool spike_fake_features = false;
+    bool spike_animate = false;
+    for (int argument = 2; argument < argc; ++argument) {
+        if (std::strcmp(argv[argument], "--spike-fake-features") == 0) {
+            spike_fake_features = true;
+        } else if (std::strcmp(argv[argument], "--spike-animate") == 0) {
+            spike_animate = true;
+        } else {
+            std::fprintf(stderr, "ERROR: unknown option: %s\n", argv[argument]);
+            return 2;
+        }
+    }
 #if !DS5_HAVE_HID_IOCTL
     (void)path;
     (void)spike_fake_features;
+    (void)spike_animate;
     (void)running;
     std::fprintf(stderr, "ERROR: <linux/usb/g_hid.h> is unavailable; GET_REPORT ioctl support is unconfirmed.\n");
     return 2;
@@ -120,36 +147,75 @@ int main(int argc, char **argv) {
     } else {
         std::printf("FEATURES: no synthetic payloads; use --spike-fake-features only for the hardware spike\n");
     }
+    if (spike_animate) {
+        std::printf("!!! SPIKE ONLY: animated input enabled; X axis sweep and button toggle every second !!!\n");
+    }
     std::uint8_t input[64]{};
     input[0] = 0x01;
+    input[1] = 128;
+    const std::uint8_t axis_values[] = {0, 64, 128, 192, 255};
+    std::size_t axis_index = 0;
+    bool button_pressed = false;
+    auto next_animation = std::chrono::steady_clock::now();
     std::map<std::uint8_t, std::pair<std::chrono::steady_clock::time_point, unsigned>> get_log_state;
+    auto last_transport_error = std::chrono::steady_clock::time_point{};
+    unsigned suppressed_transport_errors = 0;
     while (running) {
+        if (spike_animate && std::chrono::steady_clock::now() >= next_animation) {
+            input[1] = axis_values[axis_index];
+            axis_index = (axis_index + 1) % (sizeof(axis_values) / sizeof(axis_values[0]));
+            button_pressed = !button_pressed;
+            if (button_pressed) input[9] |= 0x01;
+            else input[9] &= static_cast<std::uint8_t>(~0x01);
+            std::printf("SPIKE INPUT: X=%u button=%s\n", input[1],
+                        button_pressed ? "pressed" : "released");
+            next_animation += std::chrono::seconds(1);
+        }
         ssize_t sent = write(fd, input, sizeof(input));
-        if (sent < 0 && errno != EAGAIN && errno != EINTR) std::perror("write input report");
-        pollfd p{fd, POLLIN, 0};
+        if (sent < 0 && errno != EAGAIN && errno != EINTR) {
+            if (errno == ESHUTDOWN || errno == ENODEV) {
+                log_transport_error(errno, last_transport_error, suppressed_transport_errors);
+                std::fprintf(stderr, "USB gadget disconnected; exiting probe cleanly\n");
+                close(fd);
+                return 0;
+            }
+            log_transport_error(errno, last_transport_error, suppressed_transport_errors);
+        }
+        pollfd p{fd, POLLIN | POLLPRI, 0};
         if (poll(&p, 1, 100) > 0 && (p.revents & POLLIN)) {
             std::uint8_t report[64]{};
             ssize_t n = read(fd, report, sizeof(report));
             if (n > 0) std::printf("SET_REPORT: id=0x%02x length=%zd\n", report[0], n);
         }
         std::uint8_t id = 0;
-        const int get_id_result = ioctl(fd, GADGET_HID_READ_GET_REPORT_ID, &id);
-        if (get_id_result == 0) {
-            usb_hidg_report response{};
-            if (spike_fake_features) make_fake_report(id, response);
-            else {
-                response.report_id = id;
-                response.userspace_req = 1;
-                response.length = 0;
+        if (p.revents & POLLPRI) {
+            const int get_id_result = ioctl(fd, GADGET_HID_READ_GET_REPORT_ID, &id);
+            if (get_id_result == 0) {
+                usb_hidg_report response{};
+                if (spike_fake_features) {
+                    make_fake_report(id, response);
+                } else {
+                    response.report_id = id;
+                    response.userspace_req = 1;
+                    response.length = 0;
+                }
+                log_get_report(id, response.length, get_log_state);
+                if (ioctl(fd, GADGET_HID_WRITE_GET_REPORT, &response) < 0) {
+                    if (errno == ESHUTDOWN || errno == ENODEV) {
+                        log_transport_error(errno, last_transport_error, suppressed_transport_errors);
+                        std::fprintf(stderr, "USB gadget disconnected; exiting probe cleanly\n");
+                        close(fd);
+                        return 0;
+                    }
+                    log_transport_error(errno, last_transport_error, suppressed_transport_errors);
+                }
+            } else if (errno == ENOTTY || errno == EINVAL) {
+                std::fprintf(stderr,
+                             "ERROR: f_hid GET_REPORT ioctl is unavailable at runtime "
+                             "(GADGET_HID_READ_GET_REPORT_ID: %s)\n", std::strerror(errno));
+                close(fd);
+                return 2;
             }
-            log_get_report(id, response.length, get_log_state);
-            if (ioctl(fd, GADGET_HID_WRITE_GET_REPORT, &response) < 0) std::perror("GADGET_HID_WRITE_GET_REPORT");
-        } else if (errno == ENOTTY || errno == EINVAL) {
-            std::fprintf(stderr,
-                         "ERROR: f_hid GET_REPORT ioctl is unavailable at runtime "
-                         "(GADGET_HID_READ_GET_REPORT_ID: %s)\n", std::strerror(errno));
-            close(fd);
-            return 2;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }

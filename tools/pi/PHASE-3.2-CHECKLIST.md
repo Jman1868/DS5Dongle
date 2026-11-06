@@ -71,6 +71,15 @@ until its contents have been reviewed.
    The second command must print the `SPIKE ONLY` banner. It is not a
    controller implementation and must never be used as the default service.
 
+   To make evdev changes visible during the HID input test, run:
+
+   ```sh
+   timeout 30s sudo ./build-linux/ds5dongle_hid_probe /dev/hidg0 --spike-animate
+   ```
+
+   This prints a second `SPIKE ONLY` banner and changes the X axis plus one
+   button once per second. It is disabled by default.
+
 9. Recover/teardown and paste output:
 
    ```sh
@@ -107,3 +116,17 @@ When testing against a Linux host with `hid-playstation`, record:
 2. `ls -l /dev/hidraw*` and the matching `evtest` device list.
 3. `jstest --list` and button/axis output, if `jstest` is installed.
 4. Whether the static report from the probe appears in `evtest` or `jstest`.
+
+For the animated input test, identify the joystick event node and run this
+exact command:
+
+```sh
+sudo evtest "$(find /dev/input/by-id -maxdepth 1 -type l -name '*event-joystick' -print -quit)"
+```
+
+Expected output includes `Event: time=... type 3 (EV_ABS), code 0 (ABS_X),
+value ...` with values cycling through `0`, `64`, `128`, `192`, `255`, and
+`Event: time=... type 1 (EV_KEY), code ... value 1` followed about a second
+later by the same key with `value 0`. The exact button code depends on the
+kernel's DualSense mapping. The non-animated probe can show capabilities but
+will normally produce no evdev events because its report values never change.

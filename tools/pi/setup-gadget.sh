@@ -18,6 +18,15 @@ if [ -r "$CONFIG_FILE" ]; then
     # This file is root-owned configuration, not host input.
     . "$CONFIG_FILE"
 fi
+normalize_hex() {
+    value=$(printf '%s' "$1" | sed 's/^0[xX]//')
+    case "$value" in
+        ''|*[!0-9a-fA-F]*) echo "ERROR: invalid hexadecimal value: $1" >&2; exit 1;;
+    esac
+    printf '0x%04x' "0x$value"
+}
+VID=$(normalize_hex "$VID")
+PID=$(normalize_hex "$PID")
 case "$EDGE_REPORT" in 0|1) ;; *) echo "ERROR: EDGE_REPORT must be 0 or 1" >&2; exit 1;; esac
 
 if [ "$(id -u)" -ne 0 ]; then echo "ERROR: run as root (sudo $0)" >&2; exit 1; fi
@@ -36,9 +45,9 @@ if [ "$EDGE_REPORT" -eq 1 ]; then
     report_source=desc_hid_report_dse
     report_length=453
     product_default='DualSense Edge Wireless Controller'
-    pid_default=0df2
+    pid_default=0x0df2
 fi
-[ "${PID:-}" = 0x0ce6 ] && PID=$pid_default
+[ "$PID" = 0x0ce6 ] && PID=$pid_default
 [ "${PRODUCT:-}" = 'DualSense Wireless Controller' ] && PRODUCT=$product_default
 
 mkdir -p /etc/ds5dongle /var/lib/ds5dongle
