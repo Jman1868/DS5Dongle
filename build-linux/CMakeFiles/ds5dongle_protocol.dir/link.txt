@@ -1,2 +1,0 @@
-/usr/bin/ar qc libds5dongle_protocol.a CMakeFiles/ds5dongle_protocol.dir/home/jamal/Coding/pico_zero/DS5Dongle/portable/dualsense_protocol.cpp.o
-/usr/bin/ranlib libds5dongle_protocol.a
