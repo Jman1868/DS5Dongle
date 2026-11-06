@@ -130,3 +130,35 @@ value ...` with values cycling through `0`, `64`, `128`, `192`, `255`, and
 later by the same key with `value 0`. The exact button code depends on the
 kernel's DualSense mapping. The non-animated probe can show capabilities but
 will normally produce no evdev events because its report values never change.
+
+## Fresh animated-input verification
+
+On the Pi, from the repository root, paste the complete output of:
+
+```sh
+sudo tools/pi/teardown-gadget.sh
+rm -rf build-linux
+cmake -S linux -B build-linux
+cmake --build build-linux --target ds5dongle_hid_probe
+sudo tools/pi/setup-gadget.sh
+sudo ./build-linux/ds5dongle_hid_probe /dev/hidg0 --spike-animate
+```
+
+Leave the final command running. On the host, paste the first approximately
+20 event lines from the event node resolved by:
+
+```sh
+EVENT=$(find /dev/input/by-id -maxdepth 1 -type l -name '*event-joystick' -print -quit)
+printf 'EVENT_NODE=%s\n' "$EVENT"
+sudo evtest "$EVENT"
+```
+
+The pasted host output must include `EV_KEY` `BTN_SOUTH` values alternating
+between `1` and `0`, and `EV_ABS` `ABS_X` values changing through the
+`0, 64, 128, 192, 255, 0` sequence. Do not claim input delivery until those
+lines are present. After stopping the Pi probe with Ctrl+C, paste:
+
+```sh
+sudo sh tools/pi/teardown-gadget.sh
+ls -l /dev/hidg0 2>&1 || true
+```

@@ -21,7 +21,12 @@ fi
 normalize_hex() {
     value=$(printf '%s' "$1" | sed 's/^0[xX]//')
     case "$value" in
-        ''|*[!0-9a-fA-F]*) echo "ERROR: invalid hexadecimal value: $1" >&2; exit 1;;
+        ????)
+            case "$value" in
+                *[!0-9a-fA-F]*) echo "ERROR: VID/PID must be exactly four hexadecimal digits, with an optional 0x prefix: $1" >&2; exit 1;;
+            esac
+            ;;
+        *) echo "ERROR: VID/PID must be exactly four hexadecimal digits, with an optional 0x prefix: $1" >&2; exit 1;;
     esac
     printf '0x%04x' "0x$value"
 }

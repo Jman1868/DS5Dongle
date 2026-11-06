@@ -165,8 +165,11 @@ int main(int argc, char **argv) {
             input[1] = axis_values[axis_index];
             axis_index = (axis_index + 1) % (sizeof(axis_values) / sizeof(axis_values[0]));
             button_pressed = !button_pressed;
-            if (button_pressed) input[9] |= 0x01;
-            else input[9] &= static_cast<std::uint8_t>(~0x01);
+            // USB report 0x01: report ID is byte 0, left-stick X is byte 1,
+            // and Cross is buttons[0] bit 5 at byte 8. This matches the
+            // upstream hid-playstation parser's DS_BUTTONS0_CROSS = BIT(5).
+            if (button_pressed) input[8] |= 0x20;
+            else input[8] &= static_cast<std::uint8_t>(~0x20);
             std::printf("SPIKE INPUT: X=%u button=%s\n", input[1],
                         button_pressed ? "pressed" : "released");
             next_animation += std::chrono::seconds(1);

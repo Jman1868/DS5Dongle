@@ -44,17 +44,23 @@ implementation.
   gamepad, motion, touchpad, and headset-jack input devices plus by-id event
   and js nodes. The host requested report IDs `0x09` (20 bytes), `0x20`
   (64 bytes), and `0x05` (41 bytes); all payloads were synthetic.
+- The host fully registered the synthetic device with gamepad, motion,
+  touchpad, and headset-jack inputs plus by-id nodes. This is observed on
+  hardware, but all feature payloads were synthetic.
 - The host's `evtest` showed the complete DualSense capability set (buttons,
   six axes, hat, and `FF_RUMBLE`) but no events with an unchanged static input
   report. The probe now has opt-in `--spike-animate` mode, clearly labeled
   `SPIKE ONLY`, which changes the X axis and toggles one button once per
   second. It is disabled by default and is intended only to prove input
   delivery.
-- The probe's earlier unconditional GET_REPORT ioctl polling repeatedly
-  answered the last pending ID, which explains repeated `0x05` requests around
-  disconnect. `f_hid` signals a new GET_REPORT through `POLLPRI`; the probe now
-  waits for that event. A transport `ESHUTDOWN`/`ENODEV` now produces one
-  rate-limited message and clean exit.
+- Teardown is observed to be idempotent: with the gadget already absent,
+  `tools/pi/teardown-gadget.sh` reports `UNCHANGED: gadget is not configured`.
+- The repeated GET_REPORT `0x05` burst is unexplained; revisit it with the
+  fixed probe on a clean connect/disconnect. Do not infer its cause from the
+  earlier static probe behavior.
+- `f_hid` signals a new GET_REPORT through `POLLPRI`; the probe now waits for
+  that event. A transport `ESHUTDOWN`/`ENODEV` now produces one rate-limited
+  message and clean exit.
 - The source descriptor authority is `src/usb_descriptors.cpp`: the DS HID
   report array starts at line 513 and is asserted to 337 bytes at line 682;
   the Edge array starts at line 684 and is asserted to 453 bytes at line 911.
@@ -90,6 +96,8 @@ implementation.
 - Whether Windows accepts the HID-only Sony identity and report descriptor.
 - Whether synthetic feature reports allow `hid-playstation` to register input
   devices and expose the probe's static input reports.
+- Input report delivery of Cross and changing left-stick X remains unverified
+  on hardware until the animated probe is observed with `evtest`.
 
 ## HID spike procedure
 
