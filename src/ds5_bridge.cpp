@@ -7,14 +7,17 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <sys/ioctl.h>
@@ -37,10 +40,25 @@ struct Bus {
 struct Device {
     std::string path;
     std::string address;
+    std::string name;
+    std::string icon;
+    uint32_t device_class = 0;
+    int16_t rssi = 0;
+    std::vector<std::string> uuids;
 };
 
 struct Discovery {
     Device device;
+    unsigned devices_seen = 0;
+    unsigned matches = 0;
+    std::unordered_map<std::string, Device> devices;
+};
+
+struct HidState {
+    int fd = -1;
+    std::string adapter_address;
+    std::string controller_address;
+    std::mutex mutex;
 };
 
 void log_line(const char *format, ...) {
@@ -132,37 +150,116 @@ const sd_bus_vtable kAgentVtable[] = {
     SD_BUS_VTABLE_END
 };
 
+bool contains_ci(const std::string &value, const char *needle) {
+    std::string lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string wanted = needle;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lower.find(wanted) != std::string::npos;
+}
+
+bool matches_device(const Device &device) {
+    return contains_ci(device.name, "dualsense") ||
+           contains_ci(device.name, "wireless controller") ||
+           contains_ci(device.name, "ds5") ||
+           contains_ci(device.name, "sony") ||
+           device.device_class == 0x000508 ||
+           device.icon == "input-gaming" ||
+           std::find(device.uuids.begin(), device.uuids.end(),
+                     "00001124-0000-1000-8000-00805f9b34fb") != device.uuids.end();
+}
+
+void log_device(Discovery *discovery, Device &device) {
+    discovery->devices_seen++;
+    log_line("dev added path=%s Name=%s Icon=%s Class=0x%06X RSSI=%d",
+             device.path.c_str(), device.name.c_str(), device.icon.c_str(),
+             device.device_class, device.rssi);
+    discovery->devices[device.path] = device;
+    if (matches_device(device)) {
+        discovery->matches++;
+        if (discovery->device.path.empty()) discovery->device = device;
+        log_line("matched DualSense candidate path=%s", device.path.c_str());
+    }
+}
+
+void read_device_properties(sd_bus_message *message, Device &device) {
+    while (sd_bus_message_enter_container(message, 'e', "sv") > 0) {
+        const char *key = nullptr;
+        sd_bus_message_read(message, "s", &key);
+        if (!key) {
+            sd_bus_message_skip(message, "v");
+        } else if (strcmp(key, "Name") == 0 || strcmp(key, "Icon") == 0) {
+            const char *value = nullptr;
+            if (sd_bus_message_read(message, "v", "s", &value) >= 0) {
+                if (strcmp(key, "Name") == 0) device.name = value;
+                else device.icon = value;
+            }
+        } else if (strcmp(key, "Class") == 0) {
+            uint32_t value = 0;
+            if (sd_bus_message_read(message, "v", "u", &value) >= 0) device.device_class = value;
+        } else if (strcmp(key, "RSSI") == 0) {
+            int16_t value = 0;
+            if (sd_bus_message_read(message, "v", "n", &value) >= 0) device.rssi = value;
+        } else if (strcmp(key, "UUIDs") == 0) {
+            sd_bus_message_enter_container(message, 'v', "as");
+            sd_bus_message_enter_container(message, 'a', "s");
+            while (sd_bus_message_at_end(message, false) == 0) {
+                const char *uuid = nullptr;
+                if (sd_bus_message_read(message, "s", &uuid) < 0) break;
+                device.uuids.emplace_back(uuid);
+            }
+            sd_bus_message_exit_container(message);
+            sd_bus_message_exit_container(message);
+        } else {
+            sd_bus_message_skip(message, "v");
+        }
+        sd_bus_message_exit_container(message);
+    }
+}
+
 int interfaces_added(sd_bus_message *message, void *userdata, sd_bus_error *) {
     auto *discovery = static_cast<Discovery *>(userdata);
     const char *path = nullptr;
-    if (sd_bus_message_read(message, "o", &path) < 0) return 0;
-    if (strncmp(path, "/org/bluez/hci0/dev_", 20) != 0) return 0;
+    if (sd_bus_message_read(message, "o", &path) < 0 ||
+        strncmp(path, "/org/bluez/hci0/dev_", 20) != 0) return 0;
+    Device device;
+    device.path = path;
     if (sd_bus_message_enter_container(message, 'a', "{sa{sv}}") < 0) return 0;
-    bool is_device = false;
-    const char *name = nullptr;
     while (sd_bus_message_enter_container(message, 'e', "sa{sv}") > 0) {
         const char *interface = nullptr;
         sd_bus_message_read(message, "s", &interface);
-        if (interface && strcmp(interface, "org.bluez.Device1") == 0) is_device = true;
-        sd_bus_message_enter_container(message, 'a', "{sv}");
-        while (sd_bus_message_enter_container(message, 'e', "sv") > 0) {
-            const char *key = nullptr;
-            sd_bus_message_read(message, "s", &key);
-            if (key && strcmp(key, "Name") == 0) sd_bus_message_read(message, "v", "s", &name);
-            else sd_bus_message_skip(message, "v");
+        if (interface && strcmp(interface, "org.bluez.Device1") == 0) {
+            sd_bus_message_enter_container(message, 'a', "{sv}");
+            read_device_properties(message, device);
             sd_bus_message_exit_container(message);
+        } else {
+            sd_bus_message_skip(message, "a{sv}");
         }
-        sd_bus_message_exit_container(message);
         sd_bus_message_exit_container(message);
     }
     sd_bus_message_exit_container(message);
-    if (is_device && name && (strstr(name, "DualSense") || strstr(name, "Wireless Controller"))) {
-        discovery->device.path = path;
-    }
+    log_device(discovery, device);
     return 0;
 }
 
-int interfaces_removed(sd_bus_message *, void *, sd_bus_error *) { return 0; }
+int properties_changed(sd_bus_message *message, void *userdata, sd_bus_error *) {
+    auto *discovery = static_cast<Discovery *>(userdata);
+    const char *path = sd_bus_message_get_path(message);
+    if (!path || strncmp(path, "/org/bluez/hci0/dev_", 20) != 0) return 0;
+    Device device = discovery->devices[path];
+    device.path = path;
+    const char *interface = nullptr;
+    if (sd_bus_message_read(message, "s", &interface) < 0) return 0;
+    if (!interface || strcmp(interface, "org.bluez.Device1") != 0) return 0;
+    if (sd_bus_message_enter_container(message, 'a', "{sv}") < 0) return 0;
+    read_device_properties(message, device);
+    sd_bus_message_exit_container(message);
+    sd_bus_message_skip(message, "as");
+    log_device(discovery, device);
+    return 0;
+}
 
 bool register_agent(Bus &bus) {
     sd_bus_slot *slot = nullptr;
@@ -183,7 +280,14 @@ bool register_agent(Bus &bus) {
 }
 
 bool adapter_setup(Bus &bus) {
-    int result = set_property(bus.bus, kAdapter, "org.bluez.Adapter1", "Powered", true);
+    int result = -EBUSY;
+    for (int attempt = 1; attempt <= 5 && result == -EBUSY; ++attempt) {
+        result = set_property(bus.bus, kAdapter, "org.bluez.Adapter1", "Powered", true);
+        if (result == -EBUSY) {
+            log_line("adapter busy while powering, retry %d/5", attempt);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
     if (result < 0 && result != -EALREADY) return false;
     log_line("adapter powered");
     result = set_property(bus.bus, kAdapter, "org.bluez.Adapter1", "Pairable", true);
@@ -194,14 +298,24 @@ bool adapter_setup(Bus &bus) {
 }
 
 bool discover(Bus &bus, Discovery &discovery) {
-    sd_bus_slot *slot = nullptr;
-    int result = sd_bus_match_signal(bus.bus, &slot, "org.bluez",
-        "/org/bluez", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded",
+    sd_bus_slot *added_slot = nullptr;
+    sd_bus_slot *changed_slot = nullptr;
+    int result = sd_bus_add_match(bus.bus, &added_slot,
+        "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.ObjectManager',member='InterfacesAdded'",
         interfaces_added, &discovery);
     if (result < 0) {
         log_bus_error("subscribe InterfacesAdded", result, nullptr);
         return false;
     }
+    result = sd_bus_add_match(bus.bus, &changed_slot,
+        "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
+        properties_changed, &discovery);
+    if (result < 0) {
+        log_bus_error("subscribe PropertiesChanged", result, nullptr);
+        sd_bus_slot_unref(added_slot);
+        return false;
+    }
+    log_line("discovery signal matches registered");
     result = call_method(bus.bus, "org.bluez", kAdapter, "org.bluez.Adapter1", "StartDiscovery");
     if (result < 0 && result != -EALREADY) return false;
     log_line("discovery started");
@@ -215,7 +329,10 @@ bool discover(Bus &bus, Discovery &discovery) {
         if (result == 0) sd_bus_wait(bus.bus, 1000000);
     }
     call_method(bus.bus, "org.bluez", kAdapter, "org.bluez.Adapter1", "StopDiscovery");
-    sd_bus_slot_unref(slot);
+    sd_bus_slot_unref(added_slot);
+    sd_bus_slot_unref(changed_slot);
+    log_line("discovery window ended after 60s, %u devices seen, %u matched DualSense",
+             discovery.devices_seen, discovery.matches);
     if (!discovery.device.path.empty()) {
         std::string address;
         if (get_property(bus.bus, discovery.device.path.c_str(), "org.bluez.Device1",
@@ -330,19 +447,47 @@ void fill_report(usb_hidg_report &report, uint8_t id, const std::string &control
 }
 }
 
-bool handle_get_report(int hid, const std::string &controller, const std::string &adapter) {
-    uint8_t id = 0;
-    if (ioctl(hid, GADGET_HID_READ_GET_REPORT_ID, &id) < 0) {
-        log_line("GET_REPORT id ioctl failed: %s", strerror(errno));
-        return false;
+void get_report_servo(HidState *state) {
+    log_line("GET_REPORT servo started");
+    std::array<uint8_t, 64> buffer{};
+    while (true) {
+        pollfd descriptor{state->fd, POLLIN, 0};
+        const int ready = poll(&descriptor, 1, -1);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            log_line("GET_REPORT servo poll failed: %s", strerror(errno));
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+        if (!(descriptor.revents & POLLIN)) continue;
+        const ssize_t length = read(state->fd, buffer.data(), buffer.size());
+        if (length < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            log_line("GET_REPORT servo read failed: %s", strerror(errno));
+            continue;
+        }
+        if (length != 0) continue;
+        uint8_t report_id = 0;
+        if (ioctl(state->fd, GADGET_HID_READ_GET_REPORT_ID, &report_id) < 0) {
+            log_line("GET_REPORT id ioctl failed: %s", strerror(errno));
+            continue;
+        }
+        std::string controller;
+        std::string adapter;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            controller = state->controller_address;
+            adapter = state->adapter_address;
+        }
+        usb_hidg_report report{};
+        fill_report(report, report_id, controller, adapter);
+        log_line("GET_REPORT req id=0x%02X", report_id);
+        if (report.length == 0)
+            log_line("GET_REPORT warning: unknown report id 0x%02X", report_id);
+        const int status = ioctl(state->fd, GADGET_HID_WRITE_GET_REPORT, &report);
+        log_line("GET_REPORT reply id=0x%02X len=%u ioctl=%d",
+                 report_id, report.length, status);
     }
-    usb_hidg_report report{};
-    fill_report(report, id, controller, adapter);
-    log_line("GET_REPORT id=0x%02X len=%u", id, report.length);
-    if (report.length == 0) log_line("GET_REPORT warning: unknown report id 0x%02X", id);
-    const int status = ioctl(hid, GADGET_HID_WRITE_GET_REPORT, &report);
-    log_line("GET_REPORT reply id=0x%02X len=%u status=%d", id, report.length, status);
-    return status == 0;
 }
 
 uint32_t output_crc(const uint8_t *data, size_t length) {
@@ -358,8 +503,7 @@ uint32_t output_crc(const uint8_t *data, size_t length) {
     return ~crc;
 }
 
-bool pump(int hid, int input, int output, bool l2cap,
-          const std::string &controller, const std::string &adapter) {
+bool pump(int hid, int input, int output, bool l2cap) {
     std::array<uint8_t, 672> packet{};
     unsigned long reports = 0;
     uint8_t sequence = 0;
@@ -383,9 +527,7 @@ bool pump(int hid, int input, int output, bool l2cap,
         if (fds[1].revents & (POLLERR | POLLHUP)) return false;
         if (fds[1].revents & POLLIN) {
             const ssize_t length = read(hid, packet.data(), packet.size());
-            if (length == 0) {
-                if (!handle_get_report(hid, controller, adapter)) return false;
-            } else if (length > 0) {
+            if (length > 0) {
                 if (l2cap) {
                     std::array<uint8_t, 78> bt_packet{};
                     bt_packet[0] = 0xA2;
@@ -410,6 +552,21 @@ bool pump(int hid, int input, int output, bool l2cap,
 
 int main() {
     log_line("startup");
+    int hidgfd = -1;
+    while (hidgfd < 0) {
+        hidgfd = open(kHidg, O_RDWR | O_NONBLOCK);
+        if (hidgfd < 0) {
+            log_line("open %s failed: %s; retrying in 2 seconds",
+                     kHidg, strerror(errno));
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+    }
+    log_line("hidg0 opened fd=%d", hidgfd);
+    HidState hid_state;
+    hid_state.fd = hidgfd;
+    std::thread servo(get_report_servo, &hid_state);
+    servo.detach();
+
     Bus bus;
     int result = sd_bus_default_system(&bus.bus);
     if (result < 0) {
@@ -419,6 +576,10 @@ int main() {
     sd_bus_set_method_call_timeout(bus.bus, 60ULL * 1000ULL * 1000ULL);
     std::string host_address;
     if (get_property(bus.bus, kAdapter, "org.bluez.Adapter1", "Address", host_address) < 0) return 1;
+    {
+        std::lock_guard<std::mutex> lock(hid_state.mutex);
+        hid_state.adapter_address = host_address;
+    }
     if (!adapter_setup(bus)) return 1;
     unsigned backoff = 2;
     while (true) {
@@ -430,13 +591,17 @@ int main() {
             continue;
         }
         backoff = 2;
+        {
+            std::lock_guard<std::mutex> lock(hid_state.mutex);
+            hid_state.controller_address = discovery.device.address;
+        }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         std::string raw;
         while (std::chrono::steady_clock::now() < deadline && (raw = hidraw_path()).empty())
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const int hid = open(kHidg, O_RDWR | O_NONBLOCK);
+        const int hid = dup(hidgfd);
         if (hid < 0) {
-            log_line("open %s failed: %s", kHidg, strerror(errno));
+            log_line("dup hidg0 failed: %s", strerror(errno));
             continue;
         }
         int control = -1, input = -1, output = -1;
@@ -461,7 +626,7 @@ int main() {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
         }
-        pump(hid, input, output, raw.empty(), discovery.device.address, host_address);
+        pump(hid, input, output, raw.empty());
         log_line("disconnect; closing transport");
         if (control >= 0) close(control);
         close(hid);
