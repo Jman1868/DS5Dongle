@@ -1,6 +1,6 @@
 # Copy to /etc/ds5dongle/gadget.conf. Values are shell assignments.
-VID=054c
-PID=0ce6
+VID=0x054c
+PID=0x0ce6
 MANUFACTURER='Sony Interactive Entertainment'
 PRODUCT='DualSense Wireless Controller'
 EDGE_REPORT=0

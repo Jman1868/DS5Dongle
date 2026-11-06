@@ -6,9 +6,10 @@ NAME=ds5dongle
 G="$ROOT/$NAME"
 CONFIG_FILE=${DS5DONGLE_CONFIG:-/etc/ds5dongle/gadget.conf}
 SOURCE=${DS5DONGLE_SOURCE:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 
-VID=054c
-PID=0ce6
+VID=0x054c
+PID=0x0ce6
 MANUFACTURER='Sony Interactive Entertainment'
 PRODUCT='DualSense Wireless Controller'
 EDGE_REPORT=0
@@ -21,20 +22,23 @@ case "$EDGE_REPORT" in 0|1) ;; *) echo "ERROR: EDGE_REPORT must be 0 or 1" >&2; 
 
 if [ "$(id -u)" -ne 0 ]; then echo "ERROR: run as root (sudo $0)" >&2; exit 1; fi
 if [ ! -d "$ROOT" ]; then echo "ERROR: ConfigFS is not mounted at $ROOT" >&2; exit 1; fi
+if [ -d "$G" ]; then
+    "$SCRIPT_DIR/teardown-gadget.sh"
+fi
 UDC=$(ls -1 /sys/class/udc 2>/dev/null | head -n 1 || true)
 if [ -z "$UDC" ]; then echo "ERROR: no UDC found; run enable-dwc2.sh and reboot first" >&2; exit 1; fi
 
 report_source=desc_hid_report_ds
 report_length=337
 product_default='DualSense Wireless Controller'
-pid_default=0ce6
+pid_default=0x0ce6
 if [ "$EDGE_REPORT" -eq 1 ]; then
     report_source=desc_hid_report_dse
     report_length=453
     product_default='DualSense Edge Wireless Controller'
     pid_default=0df2
 fi
-[ "${PID:-}" = 0ce6 ] && PID=$pid_default
+[ "${PID:-}" = 0x0ce6 ] && PID=$pid_default
 [ "${PRODUCT:-}" = 'DualSense Wireless Controller' ] && PRODUCT=$product_default
 
 mkdir -p /etc/ds5dongle /var/lib/ds5dongle
@@ -46,11 +50,6 @@ if [ ! -s "$serial_file" ]; then
 fi
 SERIAL=$(tr -d '\r\n' < "$serial_file")
 
-if [ -e "$G/UDC" ] && [ -n "$(cat "$G/UDC" 2>/dev/null || true)" ]; then
-    echo "ERROR: $NAME is already configured; run teardown-gadget.sh first" >&2
-    exit 1
-fi
-rm -rf "$G"
 mkdir -p "$G"
 printf '%s' "$VID" > "$G/idVendor"
 printf '%s' "$PID" > "$G/idProduct"
@@ -68,19 +67,14 @@ printf '%s' 0 > "$G/functions/hid.usb0/subclass"
 printf '%s' 0 > "$G/functions/hid.usb0/protocol"
 printf '%s' 64 > "$G/functions/hid.usb0/report_length"
 
-python3 - "$SOURCE/src/usb_descriptors.cpp" "$report_source" "$G/functions/hid.usb0/report_desc" "$report_length" <<'PY'
-import re, sys
-source, symbol, output, expected = sys.argv[1:]
-text = open(source, encoding="utf-8").read()
-match = re.search(r"\b" + re.escape(symbol) + r"\s*\[\s*\]\s*=\s*\{(.*?)\};", text, re.S)
-if not match:
-    raise SystemExit(f"descriptor {symbol} not found in {source}")
-values = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{1,2})", match.group(1)))
-if len(values) != int(expected):
-    raise SystemExit(f"descriptor {symbol}: expected {expected} bytes, found {len(values)}")
-open(output, "wb").write(values)
-print(f"REPORT_DESC: {symbol}, {len(values)} bytes from {source}")
-PY
+python3 "$SCRIPT_DIR/parse_hid_descriptor.py" \
+    "$SOURCE/src/usb_descriptors.cpp" "$report_source" \
+    "$G/functions/hid.usb0/report_desc"
+actual_length=$(wc -c < "$G/functions/hid.usb0/report_desc")
+if [ "$actual_length" -ne "$report_length" ]; then
+    echo "ERROR: descriptor $report_source: expected $report_length bytes, found $actual_length" >&2
+    exit 1
+fi
 
 ln -s "$G/functions/hid.usb0" "$G/configs/c.1/hid.usb0"
 printf '%s' "$UDC" > "$G/UDC"

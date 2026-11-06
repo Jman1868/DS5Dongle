@@ -62,6 +62,15 @@ until its contents have been reviewed.
    timeout 30s sudo ./build-linux/ds5dongle_hid_probe /dev/hidg0
    ```
 
+   Repeat the same test for the opt-in synthetic feature experiment:
+
+   ```sh
+   timeout 30s sudo ./build-linux/ds5dongle_hid_probe /dev/hidg0 --spike-fake-features
+   ```
+
+   The second command must print the `SPIKE ONLY` banner. It is not a
+   controller implementation and must never be used as the default service.
+
 9. Recover/teardown and paste output:
 
    ```sh
@@ -88,3 +97,13 @@ by the enable script, then reboot; do not delete the only backup.
    HID-only stage.
 6. Paste the probe log showing every GET_REPORT and SET_REPORT request. Do not
    proceed to audio work until these HID results are reviewed.
+
+## Linux-host follow-up for the fake-feature experiment
+
+When testing against a Linux host with `hid-playstation`, record:
+
+1. `dmesg` lines showing whether pairing, firmware, and calibration requests
+   pass.
+2. `ls -l /dev/hidraw*` and the matching `evtest` device list.
+3. `jstest --list` and button/axis output, if `jstest` is installed.
+4. Whether the static report from the probe appears in `evtest` or `jstest`.
