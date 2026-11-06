@@ -23,3 +23,6 @@ target_link_libraries(ds5dongle_protocol_test PRIVATE ds5dongle_protocol)
 target_compile_options(ds5dongle_protocol_test PRIVATE -Wall -Wextra -Wpedantic)
 
 add_test(NAME dualsense_protocol_test COMMAND ds5dongle_protocol_test)
+
+add_executable(ds5dongle_hid_probe hid_gadget_probe.cpp)
+target_compile_options(ds5dongle_hid_probe PRIVATE -Wall -Wextra -Wpedantic)
