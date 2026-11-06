@@ -6,7 +6,9 @@ After=ds5-gadget.service bluetooth.service
 [Service]
 ExecStart=/usr/local/bin/ds5-bridge
 Restart=always
-RestartSec=2
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
