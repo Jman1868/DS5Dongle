@@ -482,7 +482,7 @@ void fill_report(usb_hidg_report &report, uint8_t id, const std::string &control
     if (id == 0x09) {
         report.length = 20;
         auto address_bytes = [](const std::string &address) {
-            std::array<uint8_t, 6> bytes{};
+            std::array<uint8_t, 6> bytes{0xA0, 0xFA, 0x9C, 0xEF, 0x15, 0x27};
             unsigned value[6]{};
             if (sscanf(address.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
                        &value[0], &value[1], &value[2], &value[3], &value[4], &value[5]) == 6)
@@ -491,7 +491,13 @@ void fill_report(usb_hidg_report &report, uint8_t id, const std::string &control
             return bytes;
         };
         const auto controller_bytes = address_bytes(controller);
-        const auto adapter_bytes = address_bytes(adapter);
+        std::array<uint8_t, 6> adapter_bytes{0xB8, 0x27, 0xEB, 0xDE, 0x17, 0xEF};
+        unsigned value[6]{};
+        if (sscanf(adapter.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
+                   &value[0], &value[1], &value[2], &value[3], &value[4], &value[5]) == 6) {
+            for (size_t i = 0; i < adapter_bytes.size(); ++i)
+                adapter_bytes[i] = static_cast<uint8_t>(value[i]);
+        }
         std::reverse_copy(controller_bytes.begin(), controller_bytes.end(), report.data + 1);
         report.data[7] = 0x08; report.data[8] = 0x25; report.data[9] = 0;
         std::reverse_copy(adapter_bytes.begin(), adapter_bytes.end(), report.data + 10);
@@ -508,6 +514,7 @@ void fill_report(usb_hidg_report &report, uint8_t id, const std::string &control
 
 void get_report_servo(HidState *state) {
     log_line("GET_REPORT servo started");
+    log_line("servo poll loop entered");
     std::array<uint8_t, 64> buffer{};
     while (true) {
         pollfd descriptor{state->fd, POLLIN, 0};
@@ -518,7 +525,11 @@ void get_report_servo(HidState *state) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
-        if (!(descriptor.revents & POLLIN)) continue;
+        if (!(descriptor.revents & POLLIN)) {
+            if (descriptor.revents)
+                log_line("GET_REPORT servo poll events=0x%02X", descriptor.revents);
+            continue;
+        }
         const ssize_t length = read(state->fd, buffer.data(), buffer.size());
         if (length < 0) {
             if (errno == EINTR || errno == EAGAIN) continue;
@@ -526,14 +537,15 @@ void get_report_servo(HidState *state) {
             continue;
         }
         if (length > 0) {
+            log_line("output report from host len=%zd", length);
             std::lock_guard<std::mutex> lock(state->output_mutex);
             state->output_reports.emplace_back(buffer.begin(), buffer.begin() + length);
             continue;
         }
-        if (length != 0) continue;
         uint8_t report_id = 0;
         if (ioctl(state->fd, GADGET_HID_READ_GET_REPORT_ID, &report_id) < 0) {
-            log_line("GET_REPORT id ioctl failed: %s", strerror(errno));
+            const int error = errno;
+            log_line("GET_REPORT READ_IOCTL failed: %s", strerror(error));
             continue;
         }
         std::string controller;
@@ -546,11 +558,18 @@ void get_report_servo(HidState *state) {
         usb_hidg_report report{};
         fill_report(report, report_id, controller, adapter);
         log_line("GET_REPORT req id=0x%02X", report_id);
+        if (report_id == 0x09) {
+            log_line("GET_REPORT 0x09 reply hex: %02X %02X %02X %02X %02X %02X %02X %02X",
+                     report.data[0], report.data[1], report.data[2], report.data[3],
+                     report.data[4], report.data[5], report.data[6], report.data[7]);
+        }
         if (report.length == 0)
             log_line("GET_REPORT warning: unknown report id 0x%02X", report_id);
         const int status = ioctl(state->fd, GADGET_HID_WRITE_GET_REPORT, &report);
-        log_line("GET_REPORT reply id=0x%02X len=%u ioctl=%d",
-                 report_id, report.length, status);
+        const int error = status < 0 ? errno : 0;
+        log_line("GET_REPORT reply id=0x%02X len=%u ioctl=%d%s%s",
+                 report_id, report.length, status,
+                 status < 0 ? " err=" : "", status < 0 ? strerror(error) : "");
     }
 }
 
