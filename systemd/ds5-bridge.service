@@ -1,0 +1,12 @@
+[Unit]
+Description=DualSense Bluetooth to USB bridge
+Requires=ds5-gadget.service
+After=ds5-gadget.service bluetooth.service
+
+[Service]
+ExecStart=/usr/local/bin/ds5-bridge
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

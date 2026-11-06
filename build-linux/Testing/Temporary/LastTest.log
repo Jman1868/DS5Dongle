@@ -1,0 +1,38 @@
+Start testing: Nov 06 05:02 PST
+----------------------------------------------------------
+1/2 Testing: dualsense_protocol_test
+1/2 Test: dualsense_protocol_test
+Command: "/home/jamal/Coding/pico zero/DS5Dongle/build-linux/ds5dongle_protocol_test"
+Directory: /home/jamal/Coding/pico zero/DS5Dongle/build-linux
+"dualsense_protocol_test" start time: Nov 06 05:02 PST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"dualsense_protocol_test" end time: Nov 06 05:02 PST
+"dualsense_protocol_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/2 Testing: hid_descriptor_parser_test
+2/2 Test: hid_descriptor_parser_test
+Command: "/usr/bin/python3" "/home/jamal/Coding/pico zero/DS5Dongle/linux/../tests/test_hid_descriptor_parser.py"
+Directory: /home/jamal/Coding/pico zero/DS5Dongle/build-linux
+"hid_descriptor_parser_test" start time: Nov 06 05:02 PST
+Output:
+----------------------------------------------------------
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.007s
+
+OK
+<end of output>
+Test time =   0.16 sec
+----------------------------------------------------------
+Test Passed.
+"hid_descriptor_parser_test" end time: Nov 06 05:02 PST
+"hid_descriptor_parser_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 06 05:02 PST

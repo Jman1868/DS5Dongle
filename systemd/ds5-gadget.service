@@ -1,0 +1,12 @@
+[Unit]
+Description=DualSense USB gadget
+After=systemd-modules-load.service
+Before=ds5-bridge.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ds5-gadget-setup.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

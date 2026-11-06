@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/ds5dongle_hid_probe.dir/hid_gadget_probe.cpp.o -o ds5dongle_hid_probe 

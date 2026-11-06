@@ -1,0 +1,3 @@
+dualsense_protocol_test 3 0.00344577
+hid_descriptor_parser_test 1 0.160715
+---
