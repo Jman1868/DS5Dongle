@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.16)
+
+project(ds5dongle-linux LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+include(CTest)
+
+add_library(ds5dongle_protocol STATIC
+    ../portable/dualsense_protocol.cpp
+)
+target_include_directories(ds5dongle_protocol PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../portable
+)
+target_compile_options(ds5dongle_protocol PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(ds5dongle_protocol_test
+    ../tests/dualsense_protocol_test.cpp
+)
+target_link_libraries(ds5dongle_protocol_test PRIVATE ds5dongle_protocol)
+target_compile_options(ds5dongle_protocol_test PRIVATE -Wall -Wextra -Wpedantic)
+
+add_test(NAME dualsense_protocol_test COMMAND ds5dongle_protocol_test)

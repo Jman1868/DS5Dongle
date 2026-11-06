@@ -189,6 +189,27 @@ core-voltage bump.**
 > If you build for a different board and it fails to boot, reduce the CPU
 > frequency (and/or raise the voltage) in `CMakeLists.txt`.
 
+## Raspberry Pi Zero 2 W port
+
+The Linux port is under active development and is not yet a usable replacement
+for the Pico firmware. The current checked-in milestone contains host-buildable
+DualSense protocol framing and tests only; Bluetooth, USB gadget enumeration,
+audio, and Pi hardware integration are not implemented yet.
+
+The target hardware is a Raspberry Pi Zero 2 W running Raspberry Pi OS Lite
+(64-bit, Bookworm or newer). The controller host must connect to the Pi's
+micro-USB **DATA** port, not the PWR port. The planned gadget setup requires
+`dtoverlay=dwc2` and the `dwc2,libcomposite` kernel modules. Do not enable the
+gadget service until the Linux port reaches the USB implementation milestone.
+
+The Linux port preserves the Sony-compatible USB identity selected by the
+firmware (`VID 054C`, DualSense `PID 0CE6`, Edge `PID 0DF2`). It will use BlueZ
+for pairing and initially test the kernel `hidraw` transport, with raw L2CAP as
+a fallback if hidraw cannot carry the required reports.
+
+For the current audit, design, known limitations, and hardware questions, see
+[PORTING_NOTES.md](./PORTING_NOTES.md).
+
 ## Build Instructions
 
 ### Windows 11 (one command, no WSL)

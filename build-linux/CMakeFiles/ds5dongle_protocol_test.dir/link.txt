@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/ds5dongle_protocol_test.dir/home/jamal/Coding/pico_zero/DS5Dongle/tests/dualsense_protocol_test.cpp.o -o ds5dongle_protocol_test  libds5dongle_protocol.a 
