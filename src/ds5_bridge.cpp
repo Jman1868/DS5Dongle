@@ -516,6 +516,9 @@ void get_report_servo(HidState *state) {
     log_line("GET_REPORT servo started");
     log_line("servo poll loop entered");
     std::array<uint8_t, 64> buffer{};
+    constexpr auto kReadBackoffMin = std::chrono::milliseconds(10);
+    constexpr auto kReadBackoffMax = std::chrono::milliseconds(1000);
+    auto read_backoff = kReadBackoffMin;
     while (true) {
         pollfd descriptor{state->fd, POLLIN, 0};
         const int ready = poll(&descriptor, 1, -1);
@@ -533,9 +536,14 @@ void get_report_servo(HidState *state) {
         const ssize_t length = read(state->fd, buffer.data(), buffer.size());
         if (length < 0) {
             if (errno == EINTR || errno == EAGAIN) continue;
-            log_line("GET_REPORT servo read failed: %s", strerror(errno));
+            const int error = errno;
+            if (error != ESHUTDOWN)
+                log_line("GET_REPORT servo read unavailable: %s", strerror(error));
+            std::this_thread::sleep_for(read_backoff);
+            read_backoff = std::min(read_backoff * 2, kReadBackoffMax);
             continue;
         }
+        read_backoff = kReadBackoffMin;
         if (length > 0) {
             log_line("output report from host len=%zd", length);
             std::lock_guard<std::mutex> lock(state->output_mutex);
