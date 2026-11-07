@@ -520,7 +520,7 @@ void get_report_servo(HidState *state) {
     constexpr auto kReadBackoffMax = std::chrono::milliseconds(1000);
     auto read_backoff = kReadBackoffMin;
     while (true) {
-        pollfd descriptor{state->fd, POLLIN, 0};
+        pollfd descriptor{state->fd, POLLIN | POLLPRI, 0};
         const int ready = poll(&descriptor, 1, -1);
         if (ready < 0) {
             if (errno == EINTR) continue;
@@ -528,56 +528,56 @@ void get_report_servo(HidState *state) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
-        if (!(descriptor.revents & POLLIN)) {
-            if (descriptor.revents)
-                log_line("GET_REPORT servo poll events=0x%02X", descriptor.revents);
-            continue;
+        if (descriptor.revents & POLLPRI) {
+            uint8_t report_id = 0;
+            if (ioctl(state->fd, GADGET_HID_READ_GET_REPORT_ID, &report_id) < 0) {
+                const int error = errno;
+                log_line("GET_REPORT READ_IOCTL failed: %s", strerror(error));
+            } else {
+                std::string controller;
+                std::string adapter;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    controller = state->controller_address;
+                    adapter = state->adapter_address;
+                }
+                usb_hidg_report report{};
+                fill_report(report, report_id, controller, adapter);
+                log_line("GET_REPORT req id=0x%02X", report_id);
+                if (report_id == 0x09) {
+                    log_line("GET_REPORT 0x09 reply hex: %02X %02X %02X %02X %02X %02X %02X %02X",
+                             report.data[0], report.data[1], report.data[2], report.data[3],
+                             report.data[4], report.data[5], report.data[6], report.data[7]);
+                }
+                if (report.length == 0)
+                    log_line("GET_REPORT warning: unknown report id 0x%02X", report_id);
+                const int status = ioctl(state->fd, GADGET_HID_WRITE_GET_REPORT, &report);
+                const int error = status < 0 ? errno : 0;
+                log_line("GET_REPORT reply id=0x%02X len=%u ioctl=%d%s%s",
+                         report_id, report.length, status,
+                         status < 0 ? " err=" : "", status < 0 ? strerror(error) : "");
+            }
         }
-        const ssize_t length = read(state->fd, buffer.data(), buffer.size());
-        if (length < 0) {
-            if (errno == EINTR || errno == EAGAIN) continue;
-            const int error = errno;
-            if (error != ESHUTDOWN)
-                log_line("GET_REPORT servo read unavailable: %s", strerror(error));
-            std::this_thread::sleep_for(read_backoff);
-            read_backoff = std::min(read_backoff * 2, kReadBackoffMax);
-            continue;
+        if (descriptor.revents & POLLIN) {
+            const ssize_t length = read(state->fd, buffer.data(), buffer.size());
+            if (length < 0) {
+                if (errno == EINTR || errno == EAGAIN) continue;
+                const int error = errno;
+                if (error != ESHUTDOWN)
+                    log_line("GET_REPORT servo read unavailable: %s", strerror(error));
+                std::this_thread::sleep_for(read_backoff);
+                read_backoff = std::min(read_backoff * 2, kReadBackoffMax);
+                continue;
+            }
+            read_backoff = kReadBackoffMin;
+            if (length > 0) {
+                log_line("output report from host len=%zd", length);
+                std::lock_guard<std::mutex> lock(state->output_mutex);
+                state->output_reports.emplace_back(buffer.begin(), buffer.begin() + length);
+            }
+        } else if (!(descriptor.revents & POLLPRI) && descriptor.revents) {
+            log_line("GET_REPORT servo poll events=0x%02X", descriptor.revents);
         }
-        read_backoff = kReadBackoffMin;
-        if (length > 0) {
-            log_line("output report from host len=%zd", length);
-            std::lock_guard<std::mutex> lock(state->output_mutex);
-            state->output_reports.emplace_back(buffer.begin(), buffer.begin() + length);
-            continue;
-        }
-        uint8_t report_id = 0;
-        if (ioctl(state->fd, GADGET_HID_READ_GET_REPORT_ID, &report_id) < 0) {
-            const int error = errno;
-            log_line("GET_REPORT READ_IOCTL failed: %s", strerror(error));
-            continue;
-        }
-        std::string controller;
-        std::string adapter;
-        {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            controller = state->controller_address;
-            adapter = state->adapter_address;
-        }
-        usb_hidg_report report{};
-        fill_report(report, report_id, controller, adapter);
-        log_line("GET_REPORT req id=0x%02X", report_id);
-        if (report_id == 0x09) {
-            log_line("GET_REPORT 0x09 reply hex: %02X %02X %02X %02X %02X %02X %02X %02X",
-                     report.data[0], report.data[1], report.data[2], report.data[3],
-                     report.data[4], report.data[5], report.data[6], report.data[7]);
-        }
-        if (report.length == 0)
-            log_line("GET_REPORT warning: unknown report id 0x%02X", report_id);
-        const int status = ioctl(state->fd, GADGET_HID_WRITE_GET_REPORT, &report);
-        const int error = status < 0 ? errno : 0;
-        log_line("GET_REPORT reply id=0x%02X len=%u ioctl=%d%s%s",
-                 report_id, report.length, status,
-                 status < 0 ? " err=" : "", status < 0 ? strerror(error) : "");
     }
 }
 
