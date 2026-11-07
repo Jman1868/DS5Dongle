@@ -150,6 +150,29 @@ int set_property(sd_bus *bus, const char *path, const char *interface,
                        "Set", "ssv", interface, property, "b", value);
 }
 
+int set_property_retry_busy(sd_bus *bus, const char *path, const char *interface,
+                            const char *property, bool value) {
+    int result = 0;
+    for (int attempt = 1; attempt <= 5; ++attempt) {
+        sd_bus_error error = SD_BUS_ERROR_NULL;
+        result = sd_bus_call_method(bus, "org.bluez", path,
+                                    "org.freedesktop.DBus.Properties", "Set",
+                                    &error, nullptr, "ssv", interface, property, "b", value);
+        const bool busy = result == -EBUSY ||
+            (error.name && strcmp(error.name, "org.bluez.Error.Busy") == 0);
+        if (!busy) {
+            if (result < 0) log_bus_error("Set", result, &error);
+            else log_line("D-Bus Set succeeded");
+            sd_bus_error_free(&error);
+            return result;
+        }
+        log_line("D-Bus Set busy for %s, retry %d/5", property, attempt);
+        sd_bus_error_free(&error);
+        if (attempt < 5) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    return result;
+}
+
 int agent_success(sd_bus_message *message, void *, sd_bus_error *) {
     return sd_bus_reply_method_return(message, "");
 }
@@ -309,14 +332,8 @@ bool register_agent(Bus &bus) {
 }
 
 bool adapter_setup(Bus &bus) {
-    int result = -EBUSY;
-    for (int attempt = 1; attempt <= 5 && result == -EBUSY; ++attempt) {
-        result = set_property(bus.bus, kAdapter, "org.bluez.Adapter1", "Powered", true);
-        if (result == -EBUSY) {
-            log_line("adapter busy while powering, retry %d/5", attempt);
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-    }
+    int result = set_property_retry_busy(bus.bus, kAdapter, "org.bluez.Adapter1",
+                                         "Powered", true);
     if (result < 0 && result != -EALREADY) return false;
     log_line("adapter powered");
     result = set_property(bus.bus, kAdapter, "org.bluez.Adapter1", "Pairable", true);
@@ -512,6 +529,18 @@ void fill_report(usb_hidg_report &report, uint8_t id, const std::string &control
         report.data[28] = 0x00; report.data[29] = 0x01;
     }
 }
+
+void seed_get_report(int fd, uint8_t id, const std::string &controller,
+                     const std::string &adapter) {
+    usb_hidg_report report{};
+    fill_report(report, id, controller, adapter);
+    report.userspace_req = 0;
+    if (ioctl(fd, GADGET_HID_WRITE_GET_REPORT, &report) < 0)
+        log_line("GET_REPORT seed id=0x%02X failed: %s", id, strerror(errno));
+    else
+        log_line("GET_REPORT seed id=0x%02X len=%u", id, report.length);
+}
+
 }
 
 void get_report_servo(HidState *state) {
@@ -662,6 +691,9 @@ int main() {
     log_line("hidg0 opened fd=%d", hidgfd);
     HidState hid_state;
     hid_state.fd = hidgfd;
+    seed_get_report(hidgfd, 0x09, {}, {});
+    seed_get_report(hidgfd, 0x20, {}, {});
+    seed_get_report(hidgfd, 0x05, {}, {});
     std::thread servo(get_report_servo, &hid_state);
     servo.detach();
 
@@ -678,6 +710,7 @@ int main() {
         std::lock_guard<std::mutex> lock(hid_state.mutex);
         hid_state.adapter_address = host_address;
     }
+    seed_get_report(hidgfd, 0x09, {}, host_address);
     if (!adapter_setup(bus)) return 1;
     unsigned backoff = 2;
     while (true) {
@@ -693,6 +726,7 @@ int main() {
             std::lock_guard<std::mutex> lock(hid_state.mutex);
             hid_state.controller_address = discovery.device.address;
         }
+        seed_get_report(hidgfd, 0x09, discovery.device.address, host_address);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         std::string raw;
         while (std::chrono::steady_clock::now() < deadline && (raw = hidraw_path()).empty())

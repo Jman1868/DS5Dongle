@@ -1,7 +1,6 @@
 [Unit]
 Description=DualSense USB gadget
 After=local-fs.target
-Before=ds5-bridge.service
 
 [Service]
 Type=oneshot
