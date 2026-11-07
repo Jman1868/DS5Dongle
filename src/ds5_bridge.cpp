@@ -699,14 +699,12 @@ void get_report_servo(HidState *state) {
 }
 
 uint32_t output_crc(const uint8_t *data, size_t length) {
-    uint32_t crc = ~0xEADA2D49u;
-    while (length--) {
-        crc = (crc >> 8) ^ ([&] {
-            uint32_t value = (crc ^ *data++) & 0xff;
-            for (int bit = 0; bit < 8; ++bit)
-                value = (value >> 1) ^ (0xEDB88320u & -(value & 1));
-            return value;
-        }());
+    uint32_t crc = 0xffffffffu;
+    for (size_t index = 0; index <= length; ++index) {
+        const uint8_t value = index == 0 ? 0xA2 : data[index - 1];
+        crc ^= value;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
     }
     return ~crc;
 }
@@ -737,24 +735,18 @@ bool make_usb_input_report(const uint8_t *packet, size_t length, bool l2cap,
 std::vector<uint8_t> make_bluetooth_output(const std::vector<uint8_t> &report,
                                            uint8_t sequence, bool l2cap) {
     if (report.size() < 48 || report[0] != 0x02) return {};
-    std::vector<uint8_t> packet(78);
-    packet[0] = l2cap ? 0xA2 : 0x31;
-    if (l2cap) {
-        packet[1] = 0x31;
-        packet[2] = static_cast<uint8_t>((sequence & 0x0f) << 4);
-        packet[3] = 0x10;
-        packet[4] = 0x02;
-        std::copy(report.begin() + 1, report.begin() + 48, packet.begin() + 5);
-        const uint32_t checksum = output_crc(packet.data() + 1, 73);
-        std::memcpy(packet.data() + 74, &checksum, sizeof(checksum));
-    } else {
-        packet[1] = static_cast<uint8_t>((sequence & 0x0f) << 4);
-        packet[2] = 0x10;
-        packet[3] = 0x02;
-        std::copy(report.begin() + 1, report.begin() + 48, packet.begin() + 4);
-        const uint32_t checksum = output_crc(packet.data(), 74);
-        std::memcpy(packet.data() + 74, &checksum, sizeof(checksum));
-    }
+    std::vector<uint8_t> bluetooth_report(78);
+    bluetooth_report[0] = 0x31;
+    bluetooth_report[1] = static_cast<uint8_t>((sequence & 0x0f) << 4);
+    bluetooth_report[2] = 0x10;
+    std::copy(report.begin() + 1, report.begin() + 48, bluetooth_report.begin() + 3);
+    const uint32_t checksum = output_crc(bluetooth_report.data(), 74);
+    std::memcpy(bluetooth_report.data() + 74, &checksum, sizeof(checksum));
+    if (!l2cap) return bluetooth_report;
+
+    std::vector<uint8_t> packet(79);
+    packet[0] = 0xA2;
+    std::copy(bluetooth_report.begin(), bluetooth_report.end(), packet.begin() + 1);
     return packet;
 }
 
