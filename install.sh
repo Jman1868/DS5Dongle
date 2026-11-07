@@ -9,7 +9,7 @@ CONFIG=$BOOT/config.txt
 CMDLINE=$BOOT/cmdline.txt
 
 apt update
-apt install -y build-essential cmake pkg-config libusbgx-dev libbluetooth-dev \
+apt install -y build-essential cmake pkg-config libconfig-dev libusbgx-dev libbluetooth-dev \
     libsystemd-dev bluez bluez-tools xxd rfkill
 
 grep -qxF 'dtoverlay=dwc2' "$CONFIG" || printf '\ndtoverlay=dwc2\n' >> "$CONFIG"
