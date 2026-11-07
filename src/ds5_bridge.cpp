@@ -529,6 +529,20 @@ bool write_full(int fd, const uint8_t *data, size_t length) {
     while (length) {
         const ssize_t written = write(fd, data, length);
         if (written < 0 && errno == EINTR) continue;
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            pollfd descriptor{fd, POLLOUT, 0};
+            const int ready = poll(&descriptor, 1, -1);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                log_line("poll fd %d for write failed: %s", fd, strerror(errno));
+                return false;
+            }
+            if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                log_line("fd %d became unavailable while waiting to write", fd);
+                return false;
+            }
+            continue;
+        }
         if (written <= 0) {
             log_line("write fd %d failed: %s", fd, strerror(errno));
             return false;
