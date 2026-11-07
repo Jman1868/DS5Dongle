@@ -503,11 +503,13 @@ void fill_report(usb_hidg_report &report, uint8_t id, const std::string &control
         std::reverse_copy(adapter_bytes.begin(), adapter_bytes.end(), report.data + 10);
     } else if (id == 0x05) {
         report.length = 41;
-        std::fill(report.data, report.data + report.length, 0x80);
+        std::fill(report.data + 1, report.data + report.length, 0x80);
         report.data[1] = report.data[2] = report.data[3] = report.data[4] = report.data[5] = 0;
     } else if (id == 0x20) {
         report.length = 64;
-        report.data[0] = 1; report.data[3] = 3;
+        report.data[3] = 3;
+        report.data[24] = 0x00; report.data[25] = 0x01;
+        report.data[28] = 0x00; report.data[29] = 0x01;
     }
 }
 }
