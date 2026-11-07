@@ -506,6 +506,14 @@ bool pair_connect(Bus &bus, const Device &device) {
     return true;
 }
 
+bool remove_device(Bus &bus, const Device &device) {
+    const int result = call_method(bus.bus, "org.bluez", kAdapter, "org.bluez.Adapter1",
+                                   "RemoveDevice", "o", device.path.c_str());
+    if (result < 0) return false;
+    log_line("removed stale limited-discoverable device %s", device.address.c_str());
+    return true;
+}
+
 int open_l2cap(const std::string &address, uint16_t psm) {
     bdaddr_t bdaddr{};
     if (str2ba(address.c_str(), &bdaddr) < 0) return -1;
@@ -829,6 +837,10 @@ int main() {
     while (true) {
         Discovery discovery;
         if (!discover(bus, discovery) || !pair_connect(bus, discovery.device)) {
+            if (!discovery.device.path.empty() && discovery.device.device_class == 0x002508) {
+                log_line("limited-discoverable device failed to connect; refreshing bond");
+                remove_device(bus, discovery.device);
+            }
             log_line("retry in %u seconds", backoff);
             std::this_thread::sleep_for(std::chrono::seconds(backoff));
             backoff = std::min(backoff * 2u, 5u);
