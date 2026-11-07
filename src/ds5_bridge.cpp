@@ -297,7 +297,7 @@ bool enumerate_existing(Bus &bus, Discovery &discovery) {
         return false;
     }
 
-    if (sd_bus_message_enter_container(reply, 'a', "{oa{sa{sv}}") < 0) {
+    if (sd_bus_message_enter_container(reply, 'a', "{oa{sa{sv}}}") < 0) {
         sd_bus_error_free(&error);
         sd_bus_message_unref(reply);
         return false;
