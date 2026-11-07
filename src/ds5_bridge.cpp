@@ -47,6 +47,9 @@ struct Device {
     std::string icon;
     uint32_t device_class = 0;
     int16_t rssi = 0;
+    bool paired = false;
+    bool trusted = false;
+    bool connected = false;
     std::vector<std::string> uuids;
 };
 
@@ -242,10 +245,12 @@ void read_device_properties(sd_bus_message *message, Device &device) {
         sd_bus_message_read(message, "s", &key);
         if (!key) {
             sd_bus_message_skip(message, "v");
-        } else if (strcmp(key, "Name") == 0 || strcmp(key, "Icon") == 0) {
+        } else if (strcmp(key, "Address") == 0 || strcmp(key, "Name") == 0 ||
+                   strcmp(key, "Icon") == 0) {
             const char *value = nullptr;
             if (sd_bus_message_read(message, "v", "s", &value) >= 0) {
-                if (strcmp(key, "Name") == 0) device.name = value;
+                if (strcmp(key, "Address") == 0) device.address = value;
+                else if (strcmp(key, "Name") == 0) device.name = value;
                 else device.icon = value;
             }
         } else if (strcmp(key, "Class") == 0) {
@@ -254,6 +259,14 @@ void read_device_properties(sd_bus_message *message, Device &device) {
         } else if (strcmp(key, "RSSI") == 0) {
             int16_t value = 0;
             if (sd_bus_message_read(message, "v", "n", &value) >= 0) device.rssi = value;
+        } else if (strcmp(key, "Paired") == 0 || strcmp(key, "Trusted") == 0 ||
+                   strcmp(key, "Connected") == 0) {
+            int value = 0;
+            if (sd_bus_message_read(message, "v", "b", &value) >= 0) {
+                if (strcmp(key, "Paired") == 0) device.paired = value != 0;
+                else if (strcmp(key, "Trusted") == 0) device.trusted = value != 0;
+                else device.connected = value != 0;
+            }
         } else if (strcmp(key, "UUIDs") == 0) {
             sd_bus_message_enter_container(message, 'v', "as");
             sd_bus_message_enter_container(message, 'a', "s");
@@ -269,6 +282,54 @@ void read_device_properties(sd_bus_message *message, Device &device) {
         }
         sd_bus_message_exit_container(message);
     }
+}
+
+bool enumerate_existing(Bus &bus, Discovery &discovery) {
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *reply = nullptr;
+    const int result = sd_bus_call_method(
+        bus.bus, "org.bluez", "/", "org.freedesktop.DBus.ObjectManager",
+        "GetManagedObjects", &error, &reply, "");
+    if (result < 0) {
+        log_bus_error("GetManagedObjects", result, &error);
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+        return false;
+    }
+
+    while (sd_bus_message_enter_container(reply, 'e', "oa{sa{sv}}") > 0) {
+        const char *path = nullptr;
+        if (sd_bus_message_read(reply, "o", &path) < 0) {
+            sd_bus_message_exit_container(reply);
+            continue;
+        }
+        Device device;
+        device.path = path;
+        if (sd_bus_message_enter_container(reply, 'a', "{sa{sv}}") < 0) {
+            sd_bus_message_exit_container(reply);
+            continue;
+        }
+        while (sd_bus_message_enter_container(reply, 'e', "sa{sv}") > 0) {
+            const char *interface = nullptr;
+            sd_bus_message_read(reply, "s", &interface);
+            if (interface && strcmp(interface, "org.bluez.Device1") == 0) {
+                sd_bus_message_enter_container(reply, 'a', "{sv}");
+                read_device_properties(reply, device);
+                sd_bus_message_exit_container(reply);
+            } else {
+                sd_bus_message_skip(reply, "a{sv}");
+            }
+            sd_bus_message_exit_container(reply);
+        }
+        sd_bus_message_exit_container(reply);
+        if (strncmp(device.path.c_str(), "/org/bluez/hci0/dev_", 20) == 0 &&
+            (device.paired || device.trusted || device.connected))
+            log_device(&discovery, device);
+        sd_bus_message_exit_container(reply);
+    }
+    sd_bus_error_free(&error);
+    sd_bus_message_unref(reply);
+    return !discovery.device.path.empty();
 }
 
 int interfaces_added(sd_bus_message *message, void *userdata, sd_bus_error *) {
@@ -344,6 +405,11 @@ bool adapter_setup(Bus &bus) {
 }
 
 bool discover(Bus &bus, Discovery &discovery) {
+    if (enumerate_existing(bus, discovery)) {
+        log_line("found existing paired DualSense candidate");
+        return true;
+    }
+
     sd_bus_slot *added_slot = nullptr;
     sd_bus_slot *changed_slot = nullptr;
     int result = sd_bus_add_match(bus.bus, &added_slot,
