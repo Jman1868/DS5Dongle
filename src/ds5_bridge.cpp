@@ -297,6 +297,11 @@ bool enumerate_existing(Bus &bus, Discovery &discovery) {
         return false;
     }
 
+    if (sd_bus_message_enter_container(reply, 'a', "{oa{sa{sv}}") < 0) {
+        sd_bus_error_free(&error);
+        sd_bus_message_unref(reply);
+        return false;
+    }
     while (sd_bus_message_enter_container(reply, 'e', "oa{sa{sv}}") > 0) {
         const char *path = nullptr;
         if (sd_bus_message_read(reply, "o", &path) < 0) {
@@ -327,6 +332,7 @@ bool enumerate_existing(Bus &bus, Discovery &discovery) {
             log_device(&discovery, device);
         sd_bus_message_exit_container(reply);
     }
+    sd_bus_message_exit_container(reply);
     sd_bus_error_free(&error);
     sd_bus_message_unref(reply);
     return !discovery.device.path.empty();
