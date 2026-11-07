@@ -625,6 +625,53 @@ uint32_t output_crc(const uint8_t *data, size_t length) {
     return ~crc;
 }
 
+bool make_usb_input_report(const uint8_t *packet, size_t length, bool l2cap,
+                           std::array<uint8_t, 64> &report) {
+    const size_t report_id_offset = l2cap ? 1 : 0;
+    if (length < report_id_offset + 1 || packet[report_id_offset] == 0x01) {
+        if (length < report_id_offset + 10 || packet[report_id_offset] != 0x01) return false;
+        report.fill(0);
+        report[0] = 0x01;
+        report[1] = packet[report_id_offset + 1];
+        report[2] = packet[report_id_offset + 2];
+        report[3] = packet[report_id_offset + 7];
+        report[4] = packet[report_id_offset + 8];
+        report[5] = packet[report_id_offset + 3];
+        report[6] = packet[report_id_offset + 4];
+        report[7] = packet[report_id_offset + 5];
+        report[8] = packet[report_id_offset + 6];
+        return true;
+    }
+    if (packet[report_id_offset] != 0x31 || length < 78) return false;
+    report[0] = 0x01;
+    std::copy(packet + 2, packet + 65, report.begin() + 1);
+    return true;
+}
+
+std::vector<uint8_t> make_bluetooth_output(const std::vector<uint8_t> &report,
+                                           uint8_t sequence, bool l2cap) {
+    if (report.size() < 48 || report[0] != 0x02) return {};
+    std::vector<uint8_t> packet(78);
+    packet[0] = l2cap ? 0xA2 : 0x31;
+    if (l2cap) {
+        packet[1] = 0x31;
+        packet[2] = static_cast<uint8_t>((sequence & 0x0f) << 4);
+        packet[3] = 0x10;
+        packet[4] = 0x02;
+        std::copy(report.begin() + 1, report.begin() + 48, packet.begin() + 5);
+        const uint32_t checksum = output_crc(packet.data() + 1, 73);
+        std::memcpy(packet.data() + 74, &checksum, sizeof(checksum));
+    } else {
+        packet[1] = static_cast<uint8_t>((sequence & 0x0f) << 4);
+        packet[2] = 0x10;
+        packet[3] = 0x02;
+        std::copy(report.begin() + 1, report.begin() + 48, packet.begin() + 4);
+        const uint32_t checksum = output_crc(packet.data(), 74);
+        std::memcpy(packet.data() + 74, &checksum, sizeof(checksum));
+    }
+    return packet;
+}
+
 bool pump(int input, int output, bool l2cap, HidState *state) {
     std::array<uint8_t, 672> packet{};
     unsigned long reports = 0;
@@ -641,10 +688,13 @@ bool pump(int input, int output, bool l2cap, HidState *state) {
         if (descriptor.revents & POLLIN) {
             const ssize_t length = read(input, packet.data(), packet.size());
             if (length <= 0) return false;
-            if (packet[0] == 0xA1 && length > 1 &&
-                !write_full(state->fd, packet.data() + 1, static_cast<size_t>(length - 1)))
-                return false;
-            if (++reports % 100 == 0) log_line("forwarded %lu reports", reports);
+            std::array<uint8_t, 64> usb_report{};
+            if (make_usb_input_report(packet.data(), static_cast<size_t>(length), l2cap,
+                                      usb_report)) {
+                if (!write_full(state->fd, usb_report.data(), usb_report.size()))
+                    return false;
+                if (++reports % 100 == 0) log_line("forwarded %lu reports", reports);
+            }
         }
         std::vector<uint8_t> report;
         {
@@ -655,24 +705,9 @@ bool pump(int input, int output, bool l2cap, HidState *state) {
             }
         }
         if (!report.empty()) {
-            const ssize_t length = static_cast<ssize_t>(report.size());
-            std::copy(report.begin(), report.end(), packet.begin());
-            {
-                if (l2cap) {
-                    std::array<uint8_t, 78> bt_packet{};
-                    bt_packet[0] = 0xA2;
-                    bt_packet[1] = 0x31;
-                    bt_packet[2] = static_cast<uint8_t>((sequence++ & 0x0f) << 4);
-                    bt_packet[3] = 0x10;
-                    const size_t body = std::min<size_t>(length, 74);
-                    std::memcpy(bt_packet.data() + 4, packet.data(), body);
-                    const uint32_t checksum = output_crc(bt_packet.data() + 1, 73);
-                    std::memcpy(bt_packet.data() + 74, &checksum, sizeof(checksum));
-                    if (!write_full(output, bt_packet.data(), bt_packet.size())) return false;
-                } else if (!write_full(output, packet.data(), static_cast<size_t>(length))) {
-                    return false;
-                }
-            }
+            const auto bt_packet = make_bluetooth_output(report, sequence++, l2cap);
+            if (bt_packet.empty() || !write_full(output, bt_packet.data(), bt_packet.size()))
+                return false;
         }
     }
 }
